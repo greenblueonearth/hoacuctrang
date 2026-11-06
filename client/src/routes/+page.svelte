@@ -5,21 +5,81 @@
 
 	const pb = new PocketBase(import.meta.env.VITE_POCKETBASE_URL || 'http://127.0.0.1:8090');
 
+	type Room = {
+		id: string;
+		name: string;
+		code: string;
+		active: boolean;
+	};
+
 	let mode = $state<'login' | 'signup'>('login');
 	let phone = $state('');
 	let password = $state('');
 	let passwordConfirm = $state('');
 	let user = $state(pb.authStore.record);
+	let rooms = $state<Room[]>([]);
+	let roomsLoading = $state(false);
+	let roomError = $state('');
+	let unlockingRoomId = $state('');
+	let unlockMessage = $state('');
+	let roomsRequestId = 0;
 	let busy = $state(false);
 	let errorMessage = $state('');
 	let successMessage = $state('');
 
 	onMount(() => {
 		user = pb.authStore.record;
-		return pb.authStore.onChange(() => {
-			user = pb.authStore.record;
+		if (user) void loadRooms();
+
+		return pb.authStore.onChange((_token, record) => {
+			user = record;
+			unlockMessage = '';
+			if (record) {
+				void loadRooms();
+			} else {
+				roomsRequestId++;
+				rooms = [];
+				roomsLoading = false;
+				roomError = '';
+				unlockingRoomId = '';
+			}
 		});
 	});
+
+	async function loadRooms() {
+		const requestId = ++roomsRequestId;
+		if (!user) return;
+
+		roomsLoading = true;
+		roomError = '';
+		try {
+			const records = await pb.collection('rooms').getFullList<Room>({ sort: 'name' });
+			if (requestId === roomsRequestId) rooms = records;
+		} catch (error) {
+			if (requestId === roomsRequestId) roomError = getErrorMessage(error);
+		} finally {
+			if (requestId === roomsRequestId) roomsLoading = false;
+		}
+	}
+
+	async function unlockRoom(room: Room) {
+		if (!user || !room.active || unlockingRoomId) return;
+
+		unlockingRoomId = room.id;
+		unlockMessage = '';
+		try {
+			await pb.collection('unlock_commands').create({
+				room: room.id,
+				requestedBy: user.id,
+				action: 'unlock'
+			});
+			unlockMessage = `Đã gửi lệnh mở khóa phòng ${room.name}. ESP32 chưa gửi xác nhận trạng thái khóa.`;
+		} catch (error) {
+			unlockMessage = `Không gửi được lệnh mở khóa: ${getErrorMessage(error)}`;
+		} finally {
+			unlockingRoomId = '';
+		}
+	}
 
 	function changeMode(nextMode: 'login' | 'signup') {
 		mode = nextMode;
@@ -94,8 +154,13 @@
 </script>
 
 <svelte:head>
-	<title>Đăng nhập | Hoa Cúc Trắng</title>
-	<meta name="description" content="Đăng nhập hoặc tạo tài khoản Hoa Cúc Trắng." />
+	<title>{user ? 'Phòng của bạn | Hoa Cúc Trắng' : 'Đăng nhập | Hoa Cúc Trắng'}</title>
+	<meta
+		name="description"
+		content={user
+			? 'Quản lý phòng và gửi lệnh mở khóa.'
+			: 'Đăng nhập hoặc tạo tài khoản Hoa Cúc Trắng.'}
+	/>
 	<link rel="preconnect" href="https://fonts.googleapis.com" />
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
 	<link
@@ -115,9 +180,60 @@
 			{#if user}
 				<div class="form-content signed-in">
 					<p class="eyebrow">TÀI KHOẢN CỦA BẠN</p>
-					<h1>Xin chào trở lại.</h1>
-					<p class="intro">Bạn đã đăng nhập bằng số điện thoại này:</p>
+					<h1>Phòng của bạn.</h1>
+					<p class="intro">Đang đăng nhập bằng số điện thoại:</p>
 					<p class="account-phone">{user.phone}</p>
+
+					<section class="room-section" aria-labelledby="room-heading">
+						<div class="room-heading">
+							<h2 id="room-heading">Mở khóa phòng</h2>
+							<button
+								class="refresh-button"
+								type="button"
+								onclick={() => void loadRooms()}
+								disabled={roomsLoading}
+							>
+								Tải lại
+							</button>
+						</div>
+
+						{#if roomsLoading}
+							<p class="room-message" role="status">Đang tải danh sách phòng…</p>
+						{:else if roomError}
+							<p class="room-message error" role="alert">{roomError}</p>
+						{:else if rooms.length === 0}
+							<p class="room-message">
+								Chưa có phòng được gán cho tài khoản này. Vui lòng liên hệ quản trị viên.
+							</p>
+						{:else}
+							<ul class="room-list">
+								{#each rooms as room (room.id)}
+									<li class="room-card">
+										<div class="room-details">
+											<h3>{room.name}</h3>
+											{#if room.code}<p>Mã phòng: {room.code}</p>{/if}
+											<p class:room-inactive={!room.active} class="room-status">
+												{room.active ? 'Sẵn sàng' : 'Đang tạm ngưng'}
+											</p>
+										</div>
+										<button
+											class="unlock-button"
+											type="button"
+											onclick={() => void unlockRoom(room)}
+											disabled={!room.active || unlockingRoomId !== ''}
+											aria-label="Mở khóa phòng {room.name}"
+										>
+											{unlockingRoomId === room.id ? 'Đang gửi…' : 'Mở khóa'}
+										</button>
+									</li>
+								{/each}
+							</ul>
+						{/if}
+
+						{#if unlockMessage}
+							<p class="room-message" role="status">{unlockMessage}</p>
+						{/if}
+					</section>
 					<button class="primary-button" type="button" onclick={signOut}>Đăng xuất</button>
 				</div>
 			{:else}
@@ -428,13 +544,123 @@
 	}
 
 	.account-phone {
-		margin: 0 0 24px;
+		margin: 0;
 		padding: 13px 14px;
 		border: 1px solid #e1e7e1;
 		border-radius: 4px;
 		color: #315a3e;
 		font-size: 13px;
 		overflow-wrap: anywhere;
+	}
+
+	.room-section {
+		margin: 25px 0;
+	}
+
+	.room-heading {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		margin-bottom: 12px;
+	}
+
+	.room-heading h2 {
+		margin: 0;
+		color: #26362e;
+		font-family: 'Noto Serif', Georgia, serif;
+		font-size: 19px;
+		font-weight: 500;
+	}
+
+	.refresh-button {
+		padding: 5px 0;
+		border: 0;
+		background: transparent;
+		color: #315a3e;
+		font: inherit;
+		font-size: 11px;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.refresh-button:disabled {
+		cursor: wait;
+		opacity: 0.65;
+	}
+
+	.room-list {
+		display: grid;
+		gap: 9px;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+
+	.room-card {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		padding: 12px;
+		border: 1px solid #e1e7e1;
+		border-radius: 4px;
+	}
+
+	.room-details {
+		min-width: 0;
+	}
+
+	.room-details h3 {
+		margin: 0;
+		color: #344139;
+		font-size: 12px;
+		font-weight: 600;
+		overflow-wrap: anywhere;
+	}
+
+	.room-details p {
+		margin: 4px 0 0;
+		color: #758078;
+		font-size: 10px;
+	}
+
+	.room-details .room-status {
+		color: #37694a;
+	}
+
+	.room-details .room-inactive {
+		color: #a33e35;
+	}
+
+	.unlock-button {
+		flex: 0 0 auto;
+		min-height: 36px;
+		padding: 0 11px;
+		border: 0;
+		border-radius: 4px;
+		background: #315a3e;
+		color: #fff;
+		font: inherit;
+		font-size: 10px;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.unlock-button:hover:not(:disabled) {
+		background: #254831;
+	}
+
+	.unlock-button:disabled {
+		cursor: not-allowed;
+		opacity: 0.58;
+	}
+
+	.room-message {
+		margin: 10px 0 0;
+		color: #758078;
+		font-size: 11px;
+		line-height: 1.55;
 	}
 
 	.field-hint {
